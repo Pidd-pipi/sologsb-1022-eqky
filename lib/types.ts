@@ -39,6 +39,31 @@ export interface Annotation {
   updatedAt: string;
 }
 
+export type ReviewStatus = 'pending' | 'approved' | 'rejected' | 'superseded' | 'invalidated';
+export type ReviewMode = 'source' | 'merge';
+
+export interface CollationReview {
+  id: string;
+  groupKey: string;
+  anchorId: string;
+  anchorType: AnchorType;
+  kind: AnnotationKind;
+  anchorLabel: string;
+  mode: ReviewMode;
+  winnerId: string;
+  candidateBody: string;
+  candidateSource: string;
+  basis: string;
+  fingerprint: string;
+  relatedAnnotationIds: string[];
+  status: ReviewStatus;
+  submittedBy: string;
+  submittedAt: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+}
+
 export interface VersionSnapshot {
   id: string;
   label: string;
@@ -55,6 +80,7 @@ export interface TextDocument {
   edition: string;
   chapters: Chapter[];
   annotations: Annotation[];
+  reviews: CollationReview[];
   snapshots: VersionSnapshot[];
   updatedAt: string;
 }

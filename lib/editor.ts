@@ -1,8 +1,10 @@
 import type {
   Annotation,
   AnnotationKind,
+  CollationReview,
   ConflictGroup,
   EditorState,
+  ReviewMode,
   SearchResult,
   Sentence,
   TextDocument,
@@ -260,6 +262,149 @@ export function kindLabel(kind: AnnotationKind) {
     background: '背景',
     crossref: '互见'
   }[kind];
+}
+
+export function computeReviewFingerprint(annotations: Annotation[]): string {
+  const material = annotations
+    .map((item) => `${item.id}${item.title}${item.body}${item.source}@${item.updatedAt}`)
+    .sort()
+    .join('|');
+  let hash = 5381;
+  for (let index = 0; index < material.length; index += 1) {
+    hash = (hash * 33) ^ material.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+export function getReviewGroupAnnotations(
+  document: TextDocument,
+  review: Pick<CollationReview, 'anchorId' | 'kind'>
+): Annotation[] {
+  return document.annotations.filter(
+    (item) => item.anchorId === review.anchorId && item.kind === review.kind
+  );
+}
+
+export function isReviewStale(document: TextDocument, review: CollationReview): boolean {
+  const related = getReviewGroupAnnotations(document, review);
+  const currentIds = related.map((item) => item.id).sort();
+  const storedIds = [...review.relatedAnnotationIds].sort();
+  if (currentIds.length !== storedIds.length) return true;
+  if (currentIds.some((id, index) => id !== storedIds[index])) return true;
+  return computeReviewFingerprint(related) !== review.fingerprint;
+}
+
+export function invalidateStaleReviews(document: TextDocument): number {
+  const now = new Date().toISOString();
+  let count = 0;
+  for (const review of document.reviews) {
+    if (review.status !== 'pending') continue;
+    if (isReviewStale(document, review)) {
+      review.status = 'invalidated';
+      review.reviewedAt = now;
+      review.reviewNote = '依据或关联注释在送审后被修改，待审稿自动失效，不能再通过';
+      count += 1;
+    }
+  }
+  return count;
+}
+
+export function getPendingReview(document: TextDocument, groupKey: string): CollationReview | undefined {
+  return document.reviews.find((review) => review.groupKey === groupKey && review.status === 'pending');
+}
+
+export interface SubmitReviewInput {
+  group: ConflictGroup;
+  mode: ReviewMode;
+  winnerId: string;
+  candidateBody: string;
+  candidateSource: string;
+  basis: string;
+  submittedBy: string;
+}
+
+export function submitCollationReview(document: TextDocument, input: SubmitReviewInput): CollationReview {
+  const now = new Date().toISOString();
+  for (const review of document.reviews) {
+    if (review.groupKey === input.group.key && review.status === 'pending') {
+      review.status = 'superseded';
+      review.reviewedAt = now;
+      review.reviewNote = '同组只保留一份待审稿：提交了新待审稿，此稿被取代';
+    }
+  }
+
+  const related = getReviewGroupAnnotations(document, input.group);
+  const review: CollationReview = {
+    id: `review-${Date.now().toString(36)}-${document.reviews.length}`,
+    groupKey: input.group.key,
+    anchorId: input.group.anchorId,
+    anchorType: input.group.anchorType,
+    kind: input.group.kind,
+    anchorLabel: input.group.anchorLabel,
+    mode: input.mode,
+    winnerId: input.winnerId,
+    candidateBody: input.candidateBody,
+    candidateSource: input.candidateSource,
+    basis: input.basis,
+    fingerprint: computeReviewFingerprint(related),
+    relatedAnnotationIds: related.map((item) => item.id),
+    status: 'pending',
+    submittedBy: input.submittedBy,
+    submittedAt: now
+  };
+  document.reviews.push(review);
+  return review;
+}
+
+export type ApproveReviewResult = 'approved' | 'invalid' | 'missing';
+
+export function approveCollationReview(
+  document: TextDocument,
+  reviewId: string,
+  reviewer: string
+): ApproveReviewResult {
+  const review = document.reviews.find((item) => item.id === reviewId);
+  if (!review || review.status !== 'pending') return 'missing';
+
+  const now = new Date().toISOString();
+  if (isReviewStale(document, review)) {
+    review.status = 'invalidated';
+    review.reviewedAt = now;
+    review.reviewNote = '依据或关联注释在送审后被修改，待审稿失效，不能通过';
+    return 'invalid';
+  }
+
+  const winner = document.annotations.find((item) => item.id === review.winnerId);
+  for (const item of document.annotations) {
+    if (item.anchorId !== review.anchorId || item.kind !== review.kind) continue;
+    item.conflictState = 'resolved';
+    item.conflictResolution = `${now} · ${reviewer} 审签通过，统一采用${
+      review.mode === 'merge' ? '合并条文' : `来源「${review.candidateSource}」`
+    }。依据：${review.basis}`;
+    item.updatedAt = now;
+  }
+  if (winner) winner.body = review.candidateBody;
+
+  review.status = 'approved';
+  review.reviewedBy = reviewer;
+  review.reviewedAt = now;
+  review.reviewNote = `已统一切换同组 ${review.relatedAnnotationIds.length} 条注释并标记冲突解决。依据：${review.basis}`;
+  return 'approved';
+}
+
+export function rejectCollationReview(
+  document: TextDocument,
+  reviewId: string,
+  reviewer: string,
+  reason: string
+): boolean {
+  const review = document.reviews.find((item) => item.id === reviewId);
+  if (!review || review.status !== 'pending') return false;
+  review.status = 'rejected';
+  review.reviewedBy = reviewer;
+  review.reviewedAt = new Date().toISOString();
+  review.reviewNote = reason;
+  return true;
 }
 
 export function updateSentenceText(

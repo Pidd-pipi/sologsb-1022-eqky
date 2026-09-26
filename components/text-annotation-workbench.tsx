@@ -22,7 +22,9 @@ import {
   BookOpen,
   Check,
   ChevronRight,
+  CircleCheck,
   CircleHelp,
+  CircleX,
   FileDown,
   FileJson,
   GitCompareArrows,
@@ -35,6 +37,8 @@ import {
   Redo2,
   Save,
   Search,
+  Send,
+  Stamp,
   Trash2,
   Undo2,
   Wifi,
@@ -49,17 +53,25 @@ import {
   createInitialEditorState,
   editorReducer,
   getConflictGroups,
+  getPendingReview,
   getSentence,
   getTargetLabel,
+  invalidateStaleReviews,
+  isReviewStale,
   kindLabel,
+  approveCollationReview,
+  rejectCollationReview,
   removeAnnotationReferences,
+  submitCollationReview,
   updateSentenceText
 } from '@/lib/editor';
 import type {
   Annotation,
   AnnotationKind,
   AnchorType,
+  CollationReview,
   ConflictGroup,
+  ReviewStatus,
   Sentence,
   TextDocument,
   ViewMode,
@@ -327,6 +339,126 @@ function AnnotationCard({ annotation, document, selected, onSelect, onUpdate, on
   );
 }
 
+const reviewStatusMeta: Record<ReviewStatus, { label: string; color: 'warning' | 'success' | 'danger' | 'default' }> = {
+  pending: { label: '待审签', color: 'warning' },
+  approved: { label: '已通过', color: 'success' },
+  rejected: { label: '已退回', color: 'danger' },
+  superseded: { label: '已被取代', color: 'default' },
+  invalidated: { label: '已失效', color: 'danger' }
+};
+
+function ReviewStatusChip({ status }: { status: ReviewStatus }) {
+  const meta = reviewStatusMeta[status];
+  return <Chip size="sm" variant="flat" color={meta.color === 'default' ? 'default' : meta.color}>{meta.label}</Chip>;
+}
+
+function formatTimestamp(value: string) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+interface ReviewCardProps {
+  review: CollationReview;
+  document: TextDocument;
+  showActions?: boolean;
+  onApprove: (review: CollationReview) => void;
+  onStartReject: (review: CollationReview) => void;
+  rejecting: boolean;
+  rejectReason: string;
+  onRejectReasonChange: (value: string) => void;
+  onConfirmReject: (review: CollationReview) => void;
+  onCancelReject: () => void;
+}
+
+function ReviewCard({
+  review,
+  document,
+  showActions = false,
+  onApprove,
+  onStartReject,
+  rejecting,
+  rejectReason,
+  onRejectReasonChange,
+  onConfirmReject,
+  onCancelReject
+}: ReviewCardProps) {
+  const stale = review.status === 'pending' && isReviewStale(document, review);
+
+  return (
+    <div className={`rounded-lg border p-3 ${review.status === 'pending' ? 'border-amber-300 bg-amber-50/70' : 'border-stone-200 bg-stone-50'}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <ReviewStatusChip status={review.status} />
+        <Chip size="sm" variant="bordered" color={kindColors[review.kind]}>{kindLabel(review.kind)}</Chip>
+        <span className="text-xs text-stone-500">{review.anchorLabel}</span>
+        {review.status === 'pending' ? (
+          <span className="ml-auto text-[11px] text-amber-700">送审期间原文保持不变</span>
+        ) : null}
+      </div>
+
+      <p className="mt-2 line-clamp-2 text-[11px] text-stone-500">审签目标：{review.mode === 'merge' ? '合并各来源条文' : `采用来源「${review.candidateSource}」`}</p>
+      <div className="mt-2 rounded border border-dashed border-amber-400/70 bg-white/80 p-2">
+        <p className="whitespace-pre-wrap text-xs leading-5 text-stone-800">{review.candidateBody}</p>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-stone-600"><b>依据：</b>{review.basis}</p>
+      <p className="mt-1 text-[11px] text-stone-500">{review.submittedBy} 于 {formatTimestamp(review.submittedAt)} 送审</p>
+
+      {stale ? (
+        <p className="mt-2 flex items-start gap-1 rounded bg-red-50 p-2 text-[11px] leading-4 text-red-700">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          依据或关联注释在送审后被修改，此待审稿已失效，不能通过，请修改依据或重新选用来源后再送审。
+        </p>
+      ) : null}
+
+      {review.reviewNote ? (
+        <div className={`mt-2 rounded p-2 text-[11px] leading-4 ${review.status === 'approved' ? 'bg-green-50 text-green-800' : review.status === 'rejected' ? 'bg-red-50 text-red-700' : 'bg-stone-100 text-stone-600'}`}>
+          <b>{review.status === 'rejected' ? '退回原因' : review.status === 'approved' ? '审签意见' : '说明'}：</b>{review.reviewNote}
+        </div>
+      ) : null}
+      {review.reviewedBy ? (
+        <p className="mt-1 text-[11px] text-stone-500">{review.reviewedBy} 于 {formatTimestamp(review.reviewedAt ?? '')} 审签</p>
+      ) : null}
+
+      {showActions && review.status === 'pending' ? (
+        rejecting ? (
+          <div className="mt-3 space-y-2">
+            <Textarea
+              size="sm"
+              minRows={2}
+              label="退回原因（必填）"
+              value={rejectReason}
+              onValueChange={onRejectReasonChange}
+              placeholder="说明为何不采纳，旧稿与原文都会保留"
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <Button size="sm" color="danger" onPress={() => onConfirmReject(review)} startContent={<CircleX className="h-3.5 w-3.5" />}>
+                确认退回
+              </Button>
+              <Button size="sm" variant="light" onPress={onCancelReject}>取消</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              color="success"
+              isDisabled={stale}
+              onPress={() => onApprove(review)}
+              startContent={<CircleCheck className="h-3.5 w-3.5" />}
+            >
+              通过并统一切换
+            </Button>
+            <Button size="sm" variant="flat" color="danger" onPress={() => onStartReject(review)} startContent={<CircleX className="h-3.5 w-3.5" />}>
+              退回
+            </Button>
+          </div>
+        )
+      ) : null}
+    </div>
+  );
+}
+
 export function TextAnnotationWorkbench() {
   const [state, dispatch] = useReducer(editorReducer, initialDocument, createInitialEditorState);
   const [hydrated, setHydrated] = useState(false);
@@ -340,6 +472,17 @@ export function TextAnnotationWorkbench() {
   const [rightVersionId, setRightVersionId] = useState('current');
   const [snapshotLabel, setSnapshotLabel] = useState('');
   const [apiMessage, setApiMessage] = useState('模拟接口待命');
+  const [reviewerName, setReviewerName] = useState('审签人');
+  const [reviewDraft, setReviewDraft] = useState<{
+    groupKey: string;
+    mode: 'source' | 'merge';
+    winnerId: string;
+    candidateSource: string;
+    candidateBody: string;
+  } | null>(null);
+  const [reviewBasis, setReviewBasis] = useState('');
+  const [rejectingReviewId, setRejectingReviewId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const workspace = state.workspace;
@@ -348,6 +491,18 @@ export function TextAnnotationWorkbench() {
     document.chapters.find((chapter) => chapter.id === workspace.selectedChapterId) ?? document.chapters[0];
   const selectedSentence = getSentence(document, workspace.selectedSentenceId);
   const conflicts = useMemo(() => getConflictGroups(document), [document]);
+  const pendingReviews = useMemo(
+    () => document.reviews.filter((review) => review.status === 'pending'),
+    [document.reviews]
+  );
+  const stalePendingCount = useMemo(
+    () => pendingReviews.filter((review) => isReviewStale(document, review)).length,
+    [document, pendingReviews]
+  );
+  const sortedReviews = useMemo(
+    () => [...document.reviews].sort((a, b) => b.submittedAt.localeCompare(a.submittedAt)),
+    [document.reviews]
+  );
   const searchResults = useMemo(() => collectSearchResults(document, workspace.query), [document, workspace.query]);
 
   const anchor = pendingAnchor ?? {
@@ -364,6 +519,7 @@ export function TextAnnotationWorkbench() {
       if (raw) {
         const stored = JSON.parse(raw) as WorkspaceState;
         if (stored.document?.chapters?.length) {
+          if (!Array.isArray(stored.document.reviews)) stored.document.reviews = [];
           dispatch({ type: 'hydrate', workspace: stored });
           if (stored.document.snapshots[0]) setLeftVersionId(stored.document.snapshots[0].id);
         }
@@ -498,6 +654,7 @@ export function TextAnnotationWorkbench() {
         const annotation = doc.annotations.find((item) => item.id === id);
         if (!annotation) return;
         Object.assign(annotation, patch, { updatedAt: new Date().toISOString() });
+        invalidateStaleReviews(doc);
       }
     });
   }
@@ -510,27 +667,110 @@ export function TextAnnotationWorkbench() {
       mutate: (doc) => {
         doc.annotations = doc.annotations.filter((annotation) => annotation.id !== id);
         removeAnnotationReferences(doc, id);
+        invalidateStaleReviews(doc);
       }
     });
   }
 
-  function resolveConflict(group: ConflictGroup, winnerId: string, mergeBodies = false) {
+  function openReviewDraft(group: ConflictGroup, mode: 'source' | 'merge', winner: Annotation) {
+    const candidateBody =
+      mode === 'merge'
+        ? group.annotations.map((item) => `【${item.source}】${item.body}`).join('\n\n')
+        : winner.body;
+    setReviewDraft({
+      groupKey: group.key,
+      mode,
+      winnerId: winner.id,
+      candidateSource: mode === 'merge' ? '合并条文' : winner.source,
+      candidateBody
+    });
+    setReviewBasis('');
+    setRejectingReviewId(null);
+  }
+
+  function submitReview() {
+    if (!reviewDraft) return;
+    if (!reviewBasis.trim()) {
+      setApiMessage('送审前必须填写依据。');
+      return;
+    }
+    if (!reviewDraft.candidateBody.trim()) {
+      setApiMessage('候选文字不能为空。');
+      return;
+    }
+    const group = conflicts.find((item) => item.key === reviewDraft.groupKey);
+    if (!group) {
+      setApiMessage('冲突组已不存在，无法送审。');
+      setReviewDraft(null);
+      return;
+    }
+    const draft = reviewDraft;
     dispatch({
       type: 'commit',
-      label: mergeBodies ? '合并冲突来源' : '按来源解决冲突',
+      label: '形成候选并送审',
       mutate: (doc) => {
-        const winner = doc.annotations.find((annotation) => annotation.id === winnerId);
-        if (!winner) return;
-        for (const item of doc.annotations) {
-          if (item.anchorId !== group.anchorId || item.kind !== group.kind) continue;
-          item.conflictState = 'resolved';
-          item.conflictResolution = `${new Date().toISOString()} · 选用 ${winner.source}`;
-        }
-        if (mergeBodies) {
-          winner.body = group.annotations.map((item) => `【${item.source}】${item.body}`).join('\n\n');
+        submitCollationReview(doc, {
+          group,
+          mode: draft.mode,
+          winnerId: draft.winnerId,
+          candidateBody: draft.candidateBody.trim(),
+          candidateSource: draft.candidateSource,
+          basis: reviewBasis.trim(),
+          submittedBy: '整理者'
+        });
+      }
+    });
+    setReviewDraft(null);
+    setReviewBasis('');
+    setApiMessage('待审稿已送审；通过前同组原内容保持不变，同组只保留这一份待审稿。');
+  }
+
+  function approveReview(review: CollationReview) {
+    if (isReviewStale(document, review)) {
+      dispatch({
+        type: 'commit',
+        label: '待审稿失效',
+        mutate: (doc) => invalidateStaleReviews(doc)
+      });
+      setApiMessage('依据或关联注释在送审后被修改，该待审稿已失效，不能通过。');
+      return;
+    }
+    const reviewer = reviewerName.trim() || '审签人';
+    dispatch({
+      type: 'commit',
+      label: '审签通过并统一切换',
+      mutate: (doc) => {
+        const outcome = approveCollationReview(doc, review.id, reviewer);
+        if (outcome === 'invalid') {
+          invalidateStaleReviews(doc);
         }
       }
     });
+    setApiMessage('审签通过：同组内容已统一切换为候选文字，冲突已标记解决。');
+    setRejectingReviewId(null);
+  }
+
+  function startRejectReview(review: CollationReview) {
+    setRejectingReviewId(review.id);
+    setRejectReason('');
+  }
+
+  function confirmRejectReview(review: CollationReview) {
+    if (!rejectReason.trim()) {
+      setApiMessage('退回必须填写原因。');
+      return;
+    }
+    const reason = rejectReason.trim();
+    dispatch({
+      type: 'commit',
+      label: '退回待审稿',
+      mutate: (doc) => {
+        rejectCollationReview(doc, review.id, reviewerName.trim() || '审签人', reason);
+      }
+    });
+    setRejectingReviewId(null);
+    setRejectReason('');
+    setApiMessage('待审稿已退回并记录原因，同组原文照旧未动。');
   }
 
   function applySentenceEdit() {
@@ -541,6 +781,7 @@ export function TextAnnotationWorkbench() {
       label: '修订句子并保持引用稳定',
       mutate: (doc) => {
         remapped = updateSentenceText(doc, editingSentenceId, editingSentenceDraft.trim(), tokenizeText);
+        invalidateStaleReviews(doc);
       }
     });
     setEditingSentenceId(null);
@@ -577,6 +818,7 @@ export function TextAnnotationWorkbench() {
       mutate: (doc) => {
         doc.chapters = clone(version.chapters);
         doc.annotations = clone(version.annotations);
+        invalidateStaleReviews(doc);
       }
     });
   }
@@ -792,6 +1034,9 @@ export function TextAnnotationWorkbench() {
               </div>
               <div className="ml-auto flex flex-wrap justify-end gap-2">
                 <Chip variant="flat" color="warning">{conflicts.length} 处待解冲突</Chip>
+                {pendingReviews.length ? (
+                  <Chip variant="flat" color="secondary" startContent={<Stamp className="h-3 w-3" />}>{pendingReviews.length} 份待审稿</Chip>
+                ) : null}
                 <Chip variant="flat">{document.annotations.length} 条注释</Chip>
                 <Button size="sm" variant="flat" startContent={<Printer className="h-4 w-4" />} onPress={() => window.print()}>
                   打印
@@ -972,9 +1217,26 @@ export function TextAnnotationWorkbench() {
                   <ScrollShadow className="max-h-[calc(100vh-210px)]">
                     <div className="space-y-4 pr-1">
                       <div className="rounded-xl bg-red-50 p-3 text-xs leading-5 text-red-800">
-                        系统按“相同引用目标 + 相同注释类型”识别来源冲突。可逐条保留、合并或标记解决，正文引用 ID 不变。
+                        系统按“相同引用目标 + 相同注释类型”识别来源冲突。请选用某一来源或合并各来源形成候选文字，填写依据后送审；送审期间原文不动，同组只保留一份待审稿，通过后才统一切换并解决冲突，退回需写明原因。
                       </div>
-                      {conflicts.map((group) => (
+                      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 p-3">
+                <label className="text-xs text-stone-600" htmlFor="reviewer-name">审签人</label>
+                <Input
+                  id="reviewer-name"
+                  size="sm"
+                  className="max-w-[160px]"
+                  value={reviewerName}
+                  onValueChange={setReviewerName}
+                  aria-label="审签人署名"
+                />
+                <Chip size="sm" variant="flat" color="warning">{pendingReviews.length} 份待审稿</Chip>
+                {stalePendingCount ? (
+                  <Chip size="sm" variant="flat" color="danger">{stalePendingCount} 份已失效</Chip>
+                ) : null}
+              </div>
+                      {conflicts.map((group) => {
+                        const pendingReview = getPendingReview(document, group.key);
+                        return (
                         <Card key={group.key} shadow="none" className="border border-red-100">
                           <CardBody className="gap-3 p-3">
                             <div>
@@ -984,6 +1246,22 @@ export function TextAnnotationWorkbench() {
                               </div>
                               <p className="mt-2 line-clamp-2 font-serif text-sm text-stone-800">{group.anchorLabel}</p>
                             </div>
+
+                            {pendingReview ? (
+                              <ReviewCard
+                                review={pendingReview}
+                                document={document}
+                                showActions
+                                onApprove={approveReview}
+                                onStartReject={startRejectReview}
+                                rejecting={rejectingReviewId === pendingReview.id}
+                                rejectReason={rejectReason}
+                                onRejectReasonChange={setRejectReason}
+                                onConfirmReject={confirmRejectReview}
+                                onCancelReject={() => setRejectingReviewId(null)}
+                              />
+                            ) : null}
+
                             {group.annotations.map((annotation) => (
                               <div key={annotation.id} className="rounded-lg border border-stone-200 bg-stone-50 p-3">
                                 <div className="flex items-center justify-between gap-2">
@@ -991,22 +1269,114 @@ export function TextAnnotationWorkbench() {
                                   <Chip size="sm" variant="flat">{annotation.title}</Chip>
                                 </div>
                                 <p className="mt-2 text-xs leading-5 text-stone-600">{annotation.body}</p>
-                                <div className="mt-2 flex gap-2">
-                                  <Button size="sm" color="primary" variant="flat" onPress={() => resolveConflict(group, annotation.id)}>选用此条</Button>
-                                  <Button size="sm" variant="light" onPress={() => resolveConflict(group, annotation.id, true)}>合并条文</Button>
+                                <div className="mt-2">
+                                  <Button
+                                    size="sm"
+                                    color="primary"
+                                    variant="flat"
+                                    isDisabled={Boolean(pendingReview)}
+                                    startContent={<Send className="h-3.5 w-3.5" />}
+                                    onPress={() => openReviewDraft(group, 'source', annotation)}
+                                  >
+                                    选用此条形成候选
+                                  </Button>
                                 </div>
                               </div>
                             ))}
+
+                            <div>
+                              <Button
+                                size="sm"
+                                variant="flat"
+                                isDisabled={Boolean(pendingReview)}
+                                startContent={<Send className="h-3.5 w-3.5" />}
+                                onPress={() => openReviewDraft(group, 'merge', group.annotations[0])}
+                              >
+                                合并各来源条文形成候选
+                              </Button>
+                              {pendingReview ? (
+                                <p className="mt-1 text-[11px] text-amber-700">该组已有待审稿在审签中，需先通过、退回或由新稿取代后才能再次送审。</p>
+                              ) : null}
+                            </div>
+
+                            {reviewDraft?.groupKey === group.key ? (
+                              <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50/60 p-3">
+                                <div className="text-xs font-semibold text-amber-900">
+                                  编辑候选文字 · {reviewDraft.mode === 'merge' ? '合并条文' : `来源「${reviewDraft.candidateSource}」`}
+                                </div>
+                                <Textarea
+                                  aria-label="候选文字"
+                                  label="候选文字"
+                                  minRows={3}
+                                  value={reviewDraft.candidateBody}
+                                  onValueChange={(value) => setReviewDraft({ ...reviewDraft, candidateBody: value })}
+                                />
+                                <Textarea
+                                  aria-label="校勘依据"
+                                  label="校勘依据（送审必填）"
+                                  minRows={2}
+                                  value={reviewBasis}
+                                  onValueChange={setReviewBasis}
+                                  placeholder="说明取舍理由，如版本早晚、训诂依据、上下文义等"
+                                />
+                                <div className="flex gap-2">
+                                  <Button size="sm" color="primary" onPress={submitReview} startContent={<Stamp className="h-3.5 w-3.5" />}>
+                                    送审
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="light"
+                                    onPress={() => {
+                                      setReviewDraft(null);
+                                      setReviewBasis('');
+                                    }}
+                                  >
+                                    取消
+                                  </Button>
+                                </div>
+                                <p className="text-[11px] text-stone-500">送审后同组原内容保持不变；依据或关联注释事后被改动，此稿将自动失效。</p>
+                              </div>
+                            ) : null}
                           </CardBody>
                         </Card>
-                      ))}
+                        );
+                      })}
                       {!conflicts.length ? (
                         <div className="grid place-items-center rounded-xl border border-dashed border-green-200 bg-green-50 p-8 text-center">
                           <Check className="h-8 w-8 text-green-600" />
-                          <p className="mt-2 text-sm font-medium text-green-800">所有来源冲突均已解决</p>
-                          <p className="mt-1 text-xs text-green-700">已解决记录仍保留在各注释的来源字段中。</p>
+                          <p className="mt-2 text-sm font-medium text-green-800">所有来源冲突均已审签解决</p>
+                          <p className="mt-1 text-xs text-green-700">审签记录与待审稿保留在“审签”页签及导出的 JSON 中。</p>
                         </div>
                       ) : null}
+                    </div>
+                  </ScrollShadow>
+                </Tab>
+
+                <Tab key="reviews" title={`审签 ${pendingReviews.length}`}>
+                  <ScrollShadow className="max-h-[calc(100vh-210px)]">
+                    <div className="space-y-4 pr-1">
+                      <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs leading-5 text-stone-600">
+                        全部待审稿与审签记录：<b>通过</b>后统一切换同组文字并解决冲突；<b>退回</b>须写明原因且原文照旧；依据或关联注释事后被修改的待审稿自动失效，不能再通过。
+                      </div>
+                      {sortedReviews.length ? sortedReviews.map((review) => (
+                        <ReviewCard
+                          key={review.id}
+                          review={review}
+                          document={document}
+                          showActions={review.status === 'pending'}
+                          onApprove={approveReview}
+                          onStartReject={startRejectReview}
+                          rejecting={rejectingReviewId === review.id}
+                          rejectReason={rejectReason}
+                          onRejectReasonChange={setRejectReason}
+                          onConfirmReject={confirmRejectReview}
+                          onCancelReject={() => setRejectingReviewId(null)}
+                        />
+                      )) : (
+                        <p className="rounded-lg border border-dashed border-stone-300 p-4 text-center text-xs text-stone-500">
+                          尚无审签记录。请到“冲突”页签形成候选文字并送审。
+                        </p>
+                      )}
                     </div>
                   </ScrollShadow>
                 </Tab>
@@ -1078,7 +1448,9 @@ export function TextAnnotationWorkbench() {
                         <Button size="sm" variant="flat" onPress={exportHtml} startContent={<FileDown className="h-4 w-4" />}>导出 HTML</Button>
                         <Button size="sm" variant="flat" onPress={exportJson} startContent={<FileJson className="h-4 w-4" />}>导出 JSON</Button>
                       </div>
-                      <p className="text-[11px] leading-5 text-stone-500">{apiMessage}</p>
+                      <p className="text-[11px] leading-5 text-stone-500">
+                        JSON 包含全部正文、注释、待审稿与审签记录（通过、退回原因、失效与被取代记录）。{apiMessage}
+                      </p>
                     </div>
                   </ScrollShadow>
                 </Tab>

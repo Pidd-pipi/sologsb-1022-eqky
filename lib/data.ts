@@ -251,6 +251,7 @@ export const initialDocument: TextDocument = {
   edition: '整理底本',
   chapters,
   annotations,
+  reviews: [],
   snapshots: [initialSnapshot],
   updatedAt: FIXED_TIME
 };

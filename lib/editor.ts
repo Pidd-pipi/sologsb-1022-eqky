@@ -3,11 +3,13 @@ import type {
   AnnotationKind,
   ConflictGroup,
   EditorState,
+  ReviewDraft,
   SearchResult,
   Sentence,
   TextDocument,
   WorkspaceState
 } from './types';
+import { syncPendingReviews } from './review';
 
 export const STORAGE_KEY = 'sologsb-1022/public-text-annotator/v1';
 
@@ -58,16 +60,23 @@ export type EditorAction =
 
 export function editorReducer(state: EditorState, action: EditorAction): EditorState {
   switch (action.type) {
-    case 'hydrate':
+    case 'hydrate': {
+      const workspace = clone(action.workspace);
+      if (!Array.isArray(workspace.document.reviews)) workspace.document.reviews = [];
+      syncPendingReviews(workspace.document);
       return {
-        workspace: action.workspace,
+        workspace,
         past: [],
         future: [],
         lastAction: '已恢复离线草稿'
       };
+    }
     case 'commit': {
       const next = clone(state.workspace);
+      if (!Array.isArray(next.document.reviews)) next.document.reviews = [];
       action.mutate(next.document);
+      // 依据/关联注释之后被改过：旧待审稿自动失效，不能再通过
+      syncPendingReviews(next.document);
       next.document.updatedAt = new Date().toISOString();
       next.dirty = true;
       return pushHistory(state, next, action.label);
@@ -223,6 +232,13 @@ export function getConflictGroups(document: TextDocument): ConflictGroup[] {
     groups.set(key, [...(groups.get(key) ?? []), annotation]);
   }
 
+  const pendingByKey = new Map<string, ReviewDraft>();
+  const latestByKey = new Map<string, ReviewDraft>();
+  for (const review of document.reviews ?? []) {
+    latestByKey.set(review.groupKey, review);
+    if (review.status === 'pending' && !pendingByKey.has(review.groupKey)) pendingByKey.set(review.groupKey, review);
+  }
+
   return Array.from(groups.entries())
     .filter(([, items]) => {
       const bodies = new Set(items.map((item) => item.body.trim()));
@@ -238,7 +254,9 @@ export function getConflictGroups(document: TextDocument): ConflictGroup[] {
         anchorType: first.anchorType,
         kind: first.kind,
         anchorLabel: sentence ? `“${sentence.text}”` : tokenText ? `“${tokenText}”` : '文本片段',
-        annotations: items
+        annotations: items,
+        pendingReview: pendingByKey.get(key) ?? null,
+        latestReview: latestByKey.get(key) ?? null
       };
     });
 }

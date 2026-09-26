@@ -46,6 +46,51 @@ export interface VersionSnapshot {
   createdAt: string;
   chapters: Chapter[];
   annotations: Annotation[];
+  reviews: ReviewDraft[];
+}
+
+export type ReviewStatus = 'pending' | 'approved' | 'rejected' | 'invalidated' | 'withdrawn';
+export type ReviewMode = 'source' | 'merge';
+export type ReviewEventType = 'submitted' | 'approved' | 'rejected' | 'invalidated' | 'withdrawn';
+
+export interface ReviewAnnotationSnapshot {
+  annotationId: string;
+  title: string;
+  body: string;
+  source: string;
+  references: string[];
+}
+
+export interface ReviewEvent {
+  id: string;
+  type: ReviewEventType;
+  actor: string;
+  comment: string;
+  at: string;
+}
+
+export interface ReviewDraft {
+  id: string;
+  groupKey: string;
+  anchorId: string;
+  anchorType: AnchorType;
+  kind: AnnotationKind;
+  anchorLabel: string;
+  mode: ReviewMode;
+  sourceAnnotationId?: string;
+  candidateTitle: string;
+  candidateBody: string;
+  basis: string;
+  proposedBy: string;
+  status: ReviewStatus;
+  memberIds: string[];
+  snapshots: ReviewAnnotationSnapshot[];
+  reviewer?: string;
+  rejectReason?: string;
+  createdAt: string;
+  submittedAt: string;
+  decidedAt?: string;
+  events: ReviewEvent[];
 }
 
 export interface TextDocument {
@@ -55,6 +100,7 @@ export interface TextDocument {
   edition: string;
   chapters: Chapter[];
   annotations: Annotation[];
+  reviews: ReviewDraft[];
   snapshots: VersionSnapshot[];
   updatedAt: string;
 }
@@ -92,4 +138,6 @@ export interface ConflictGroup {
   kind: AnnotationKind;
   anchorLabel: string;
   annotations: Annotation[];
+  pendingReview: ReviewDraft | null;
+  latestReview: ReviewDraft | null;
 }

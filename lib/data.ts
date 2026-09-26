@@ -3,6 +3,7 @@ import type {
   Annotation,
   AnnotationKind,
   Chapter,
+  ReviewDraft,
   Sentence,
   TextDocument,
   TextToken,
@@ -232,8 +233,66 @@ const annotations: Annotation[] = [
     tags: ['互见'],
     conflictState: 'open',
     updatedAt: FIXED_TIME
+  },
+  {
+    id: 'annotation-10',
+    anchorId: bianId,
+    anchorType: 'word',
+    kind: 'variant',
+    title: '辩 / 辨（字形）',
+    body: '唐《释文》出“辨”字，云“本亦作辩”。此句言对岸不辨牛马，当以“辨”为本字，“辩”为借字。',
+    source: '经典释文',
+    references: [],
+    status: 'open',
+    tags: ['异体字', '通假'],
+    conflictState: 'open',
+    updatedAt: FIXED_TIME
   }
 ];
+
+const pendingNorthSeaReview: ReviewDraft = {
+  id: 'review-seed-1',
+  groupKey: `${annotations[0].anchorId}:footnote`,
+  anchorId: annotations[0].anchorId,
+  anchorType: 'sentence',
+  kind: 'footnote',
+  anchorLabel: '北冥有鱼，其名为鲲。',
+  mode: 'merge',
+  candidateTitle: '北冥（会校）',
+  candidateBody:
+    '【郭庆藩本】冥，一作溟。指北方荒远、幽深之地，不必拘定为具体海域。\n\n【王先谦本】“冥”可径释为海。北冥即北海，语意直截，不烦引申。',
+  basis: '郭注长于通假与地理考据，王注直截便读；拟会校两存，先列郭说次列王说，请审定取舍。',
+  proposedBy: '整理者',
+  status: 'pending',
+  memberIds: ['annotation-1', 'annotation-2'],
+  snapshots: [
+    {
+      annotationId: 'annotation-1',
+      title: annotations[0].title,
+      body: annotations[0].body,
+      source: annotations[0].source,
+      references: annotations[0].references.slice()
+    },
+    {
+      annotationId: 'annotation-2',
+      title: annotations[1].title,
+      body: annotations[1].body,
+      source: annotations[1].source,
+      references: annotations[1].references.slice()
+    }
+  ],
+  createdAt: FIXED_TIME,
+  submittedAt: FIXED_TIME,
+  events: [
+    {
+      id: 'review-event-seed-1',
+      type: 'submitted',
+      actor: '整理者',
+      comment: '合并各组来源形成候选，依据：郭注长于通假与地理考据，王注直截便读；拟会校两存，先列郭说次列王说，请审定取舍。',
+      at: FIXED_TIME
+    }
+  ]
+};
 
 const initialSnapshot: VersionSnapshot = {
   id: 'snapshot-base',
@@ -241,7 +300,8 @@ const initialSnapshot: VersionSnapshot = {
   note: '初始整理稿，保留底本用字并录入首批校注。',
   createdAt: FIXED_TIME,
   chapters: structuredClone(chapters),
-  annotations: structuredClone(annotations)
+  annotations: structuredClone(annotations),
+  reviews: []
 };
 
 export const initialDocument: TextDocument = {
@@ -251,6 +311,7 @@ export const initialDocument: TextDocument = {
   edition: '整理底本',
   chapters,
   annotations,
+  reviews: [pendingNorthSeaReview],
   snapshots: [initialSnapshot],
   updatedAt: FIXED_TIME
 };

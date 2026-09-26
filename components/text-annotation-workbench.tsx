@@ -18,9 +18,7 @@ import {
   Tooltip
 } from '@heroui/react';
 import {
-  AlertTriangle,
   BookOpen,
-  Check,
   ChevronRight,
   CircleHelp,
   FileDown,
@@ -55,11 +53,20 @@ import {
   removeAnnotationReferences,
   updateSentenceText
 } from '@/lib/editor';
+import {
+  approveReview,
+  createReviewDraft,
+  rejectReview,
+  visibleReviewHistory,
+  withdrawReview
+} from '@/lib/review';
+import { ReviewPanel } from '@/components/review-panel';
+import type { SubmitReviewPayload } from '@/components/review-panel';
 import type {
   Annotation,
   AnnotationKind,
   AnchorType,
-  ConflictGroup,
+  ReviewDraft,
   Sentence,
   TextDocument,
   ViewMode,
@@ -248,12 +255,13 @@ interface AnnotationCardProps {
   annotation: Annotation;
   document: TextDocument;
   selected: boolean;
+  pendingReview?: boolean;
   onSelect: () => void;
   onUpdate: (patch: Partial<Annotation>) => void;
   onDelete: () => void;
 }
 
-function AnnotationCard({ annotation, document, selected, onSelect, onUpdate, onDelete }: AnnotationCardProps) {
+function AnnotationCard({ annotation, document, selected, pendingReview = false, onSelect, onUpdate, onDelete }: AnnotationCardProps) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(annotation.title);
   const [body, setBody] = useState(annotation.body);
@@ -279,6 +287,7 @@ function AnnotationCard({ annotation, document, selected, onSelect, onUpdate, on
                   {kindLabel(annotation.kind)}
                 </Chip>
                 {annotation.conflictState === 'open' ? <Chip size="sm" color="danger" variant="bordered">争议中</Chip> : null}
+                {pendingReview ? <Chip size="sm" color="warning" variant="bordered">待审中</Chip> : null}
               </div>
               <h4 className="mt-2 font-semibold text-stone-900">{annotation.title}</h4>
             </div>
@@ -289,6 +298,11 @@ function AnnotationCard({ annotation, document, selected, onSelect, onUpdate, on
 
         {editing ? (
           <div className="space-y-2">
+            {pendingReview ? (
+              <p className="rounded-md bg-amber-50 px-2 py-1 text-[11px] leading-4 text-amber-800">
+                该注释所属冲突组正在送审；保存修改会使待审稿失效，需要重新送审。
+              </p>
+            ) : null}
             <Input size="sm" label="标题" value={title} onValueChange={setTitle} />
             <Textarea size="sm" minRows={3} label="正文" value={body} onValueChange={setBody} />
             <Input size="sm" label="来源" value={source} onValueChange={setSource} />
@@ -348,6 +362,19 @@ export function TextAnnotationWorkbench() {
     document.chapters.find((chapter) => chapter.id === workspace.selectedChapterId) ?? document.chapters[0];
   const selectedSentence = getSentence(document, workspace.selectedSentenceId);
   const conflicts = useMemo(() => getConflictGroups(document), [document]);
+  const pendingByAnnotation = useMemo(() => {
+    const map = new Map<string, ReviewDraft>();
+    for (const review of document.reviews ?? []) {
+      if (review.status !== 'pending') continue;
+      for (const memberId of review.memberIds) map.set(memberId, review);
+    }
+    return map;
+  }, [document.reviews]);
+  const pendingGroupCount = useMemo(
+    () => conflicts.filter((group) => group.pendingReview).length,
+    [conflicts]
+  );
+  const reviewHistory = useMemo(() => visibleReviewHistory(document), [document]);
   const searchResults = useMemo(() => collectSearchResults(document, workspace.query), [document, workspace.query]);
 
   const anchor = pendingAnchor ?? {
@@ -514,21 +541,43 @@ export function TextAnnotationWorkbench() {
     });
   }
 
-  function resolveConflict(group: ConflictGroup, winnerId: string, mergeBodies = false) {
+  function submitReview(payload: SubmitReviewPayload) {
     dispatch({
       type: 'commit',
-      label: mergeBodies ? '合并冲突来源' : '按来源解决冲突',
+      label: '形成候选并送审',
       mutate: (doc) => {
-        const winner = doc.annotations.find((annotation) => annotation.id === winnerId);
-        if (!winner) return;
-        for (const item of doc.annotations) {
-          if (item.anchorId !== group.anchorId || item.kind !== group.kind) continue;
-          item.conflictState = 'resolved';
-          item.conflictResolution = `${new Date().toISOString()} · 选用 ${winner.source}`;
-        }
-        if (mergeBodies) {
-          winner.body = group.annotations.map((item) => `【${item.source}】${item.body}`).join('\n\n');
-        }
+        const review = createReviewDraft(payload);
+        if (review) doc.reviews.push(review);
+      }
+    });
+  }
+
+  function handleApprove(reviewId: string, reviewer: string, note: string) {
+    dispatch({
+      type: 'commit',
+      label: '审签通过，统一切换候选文字',
+      mutate: (doc) => {
+        approveReview(doc, reviewId, reviewer, note);
+      }
+    });
+  }
+
+  function handleReject(reviewId: string, reviewer: string, reason: string) {
+    dispatch({
+      type: 'commit',
+      label: '退回待审稿',
+      mutate: (doc) => {
+        rejectReview(doc, reviewId, reviewer, reason);
+      }
+    });
+  }
+
+  function handleWithdraw(reviewId: string, actor: string, reason: string) {
+    dispatch({
+      type: 'commit',
+      label: '撤回待审稿',
+      mutate: (doc) => {
+        withdrawReview(doc, reviewId, actor, reason);
       }
     });
   }
@@ -557,10 +606,11 @@ export function TextAnnotationWorkbench() {
         doc.snapshots.push({
           id,
           label,
-          note: `由编辑版保存，共 ${doc.annotations.length} 条注释`,
+          note: `由编辑版保存，共 ${doc.annotations.length} 条注释、${doc.reviews.length} 份审签`,
           createdAt: new Date().toISOString(),
           chapters: clone(doc.chapters),
-          annotations: clone(doc.annotations)
+          annotations: clone(doc.annotations),
+          reviews: clone(doc.reviews)
         });
       }
     });
@@ -577,6 +627,7 @@ export function TextAnnotationWorkbench() {
       mutate: (doc) => {
         doc.chapters = clone(version.chapters);
         doc.annotations = clone(version.annotations);
+        doc.reviews = clone(version.reviews ?? []);
       }
     });
   }
@@ -791,7 +842,7 @@ export function TextAnnotationWorkbench() {
                 <p className="mt-1 text-sm text-stone-500">{selectedChapter?.summary}</p>
               </div>
               <div className="ml-auto flex flex-wrap justify-end gap-2">
-                <Chip variant="flat" color="warning">{conflicts.length} 处待解冲突</Chip>
+                <Chip variant="flat" color="warning">{conflicts.length} 处冲突 · {pendingGroupCount} 待审</Chip>
                 <Chip variant="flat">{document.annotations.length} 条注释</Chip>
                 <Button size="sm" variant="flat" startContent={<Printer className="h-4 w-4" />} onPress={() => window.print()}>
                   打印
@@ -866,11 +917,19 @@ export function TextAnnotationWorkbench() {
                             <div className="mt-3 grid gap-2 rounded-xl border border-blue-100 bg-blue-50/50 p-3 sm:grid-cols-2">
                               {sentenceAnnotations.length ? sentenceAnnotations.map((annotation) => (
                                 <div key={annotation.id} className="critical-variant text-xs leading-5">
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex flex-wrap items-center gap-2">
                                     <Chip size="sm" color={kindColors[annotation.kind]} variant="flat">{kindLabel(annotation.kind)}</Chip>
                                     <b>{annotation.source}</b>
+                                    {pendingByAnnotation.has(annotation.id) ? (
+                                      <Chip size="sm" color="warning" variant="bordered">送审中，原文暂不动</Chip>
+                                    ) : null}
                                   </div>
                                   <p className="mt-1 text-stone-700">{annotation.body}</p>
+                                  {pendingByAnnotation.has(annotation.id) ? (
+                                    <p className="mt-1 text-[11px] leading-4 text-amber-700">
+                                      候选「{pendingByAnnotation.get(annotation.id)?.candidateTitle}」待审定。
+                                    </p>
+                                  ) : null}
                                 </div>
                               )) : <p className="text-xs text-stone-500">本句尚无来源异文或校记。</p>}
                             </div>
@@ -959,6 +1018,7 @@ export function TextAnnotationWorkbench() {
                           annotation={annotation}
                           document={document}
                           selected={selectedAnnotation?.id === annotation.id}
+                          pendingReview={pendingByAnnotation.has(annotation.id)}
                           onSelect={() => dispatch({ type: 'selectAnnotation', annotationId: annotation.id })}
                           onUpdate={(patch) => updateAnnotation(annotation.id, patch)}
                           onDelete={() => deleteAnnotation(annotation.id)}
@@ -968,46 +1028,17 @@ export function TextAnnotationWorkbench() {
                   </ScrollShadow>
                 </Tab>
 
-                <Tab key="conflicts" title={`冲突 ${conflicts.length}`}>
+                <Tab key="conflicts" title={`审签 ${conflicts.length}`}>
                   <ScrollShadow className="max-h-[calc(100vh-210px)]">
-                    <div className="space-y-4 pr-1">
-                      <div className="rounded-xl bg-red-50 p-3 text-xs leading-5 text-red-800">
-                        系统按“相同引用目标 + 相同注释类型”识别来源冲突。可逐条保留、合并或标记解决，正文引用 ID 不变。
-                      </div>
-                      {conflicts.map((group) => (
-                        <Card key={group.key} shadow="none" className="border border-red-100">
-                          <CardBody className="gap-3 p-3">
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <Chip size="sm" color="danger" variant="flat">{kindLabel(group.kind)}</Chip>
-                                <span className="text-xs text-stone-500">{group.annotations.length} 个来源</span>
-                              </div>
-                              <p className="mt-2 line-clamp-2 font-serif text-sm text-stone-800">{group.anchorLabel}</p>
-                            </div>
-                            {group.annotations.map((annotation) => (
-                              <div key={annotation.id} className="rounded-lg border border-stone-200 bg-stone-50 p-3">
-                                <div className="flex items-center justify-between gap-2">
-                                  <b className="text-sm text-stone-900">{annotation.source}</b>
-                                  <Chip size="sm" variant="flat">{annotation.title}</Chip>
-                                </div>
-                                <p className="mt-2 text-xs leading-5 text-stone-600">{annotation.body}</p>
-                                <div className="mt-2 flex gap-2">
-                                  <Button size="sm" color="primary" variant="flat" onPress={() => resolveConflict(group, annotation.id)}>选用此条</Button>
-                                  <Button size="sm" variant="light" onPress={() => resolveConflict(group, annotation.id, true)}>合并条文</Button>
-                                </div>
-                              </div>
-                            ))}
-                          </CardBody>
-                        </Card>
-                      ))}
-                      {!conflicts.length ? (
-                        <div className="grid place-items-center rounded-xl border border-dashed border-green-200 bg-green-50 p-8 text-center">
-                          <Check className="h-8 w-8 text-green-600" />
-                          <p className="mt-2 text-sm font-medium text-green-800">所有来源冲突均已解决</p>
-                          <p className="mt-1 text-xs text-green-700">已解决记录仍保留在各注释的来源字段中。</p>
-                        </div>
-                      ) : null}
-                    </div>
+                    <ReviewPanel
+                      document={document}
+                      groups={conflicts}
+                      history={reviewHistory}
+                      onSubmit={submitReview}
+                      onApprove={handleApprove}
+                      onReject={handleReject}
+                      onWithdraw={handleWithdraw}
+                    />
                   </ScrollShadow>
                 </Tab>
 
